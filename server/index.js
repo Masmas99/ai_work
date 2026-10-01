@@ -6,7 +6,8 @@ import { randomUUID } from 'node:crypto'
 const app = express()
 const port = Number(process.env.PORT || 8787)
 const tasks = new Map()
-const providerBaseUrl = (process.env.AI_BASE_URL || 'http://localhost:20128/v1').replace(/\/$/, '')
+const configuredBaseUrl = (process.env.AI_BASE_URL || 'http://localhost:20128').replace(/\/+$/, '')
+const providerBaseUrl = configuredBaseUrl.endsWith('/v1') ? configuredBaseUrl : `${configuredBaseUrl}/v1`
 const providerEnabled = Boolean(process.env.AI_API_KEY)
 
 app.use(cors())
