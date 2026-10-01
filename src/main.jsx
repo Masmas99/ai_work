@@ -77,7 +77,7 @@ function App() {
   const updateRun = (event) => {
     setActiveRun((current) => {
       if (!current) return current
-      const nextRun = { ...current, status: event.type, progress: event.progress ?? current.progress, message: event.message ?? current.message }
+      const nextRun = { ...current, status: event.type, progress: event.progress ?? current.progress, message: event.result || event.message || current.message }
       activeRunRef.current = nextRun
       return nextRun
     })

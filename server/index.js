@@ -1,10 +1,13 @@
 import cors from 'cors'
+import 'dotenv/config'
 import express from 'express'
 import { randomUUID } from 'node:crypto'
 
 const app = express()
 const port = Number(process.env.PORT || 8787)
 const tasks = new Map()
+const providerBaseUrl = (process.env.AI_BASE_URL || 'http://localhost:20128/v1').replace(/\/$/, '')
+const providerEnabled = Boolean(process.env.AI_API_KEY)
 
 app.use(cors())
 app.use(express.json())
@@ -18,10 +21,41 @@ const sendEvent = (run, event) => {
 
 const finishRun = (run, status, message) => {
   if (run.timer) clearTimeout(run.timer)
+  if (run.abortController) run.abortController.abort()
   run.status = status
-  sendEvent(run, { type: status, message, progress: status === 'completed' ? 100 : run.progress, timestamp: new Date().toISOString() })
+  sendEvent(run, { type: status, message, result: run.result, progress: status === 'completed' ? 100 : run.progress, timestamp: new Date().toISOString() })
   for (const response of run.clients) response.end()
   run.clients.clear()
+}
+
+const runProviderWorker = async (run) => {
+  run.abortController = new AbortController()
+  sendEvent(run, { type: 'planning', message: `Planning “${run.title}” with ${run.owner}`, progress: 18, timestamp: new Date().toISOString() })
+  sendEvent(run, { type: 'tool_call', message: 'Sending the brief to your 9Router model', progress: 32, timestamp: new Date().toISOString() })
+  try {
+    const providerResponse = await fetch(`${providerBaseUrl}/chat/completions`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${process.env.AI_API_KEY}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: process.env.AI_MODEL || 'auto',
+        messages: [
+          { role: 'system', content: `You are ${run.owner}, an AI employee. Be concise, practical, and clearly label assumptions.` },
+          { role: 'user', content: run.title },
+        ],
+        temperature: 0.4,
+      }),
+      signal: run.abortController.signal,
+    })
+    if (!providerResponse.ok) throw new Error(`9Router returned HTTP ${providerResponse.status}`)
+    const payload = await providerResponse.json()
+    run.result = payload.choices?.[0]?.message?.content || 'The model returned no text.'
+    run.progress = 92
+    sendEvent(run, { type: 'observation', message: 'The model returned a result for review', result: run.result, progress: run.progress, timestamp: new Date().toISOString() })
+    finishRun(run, 'completed', 'Task complete — ready for your review')
+  } catch (error) {
+    if (run.status === 'cancelled' || error.name === 'AbortError') return
+    finishRun(run, 'failed', error.message || 'The AI provider request failed')
+  }
 }
 
 const runDemoWorker = (run) => {
@@ -40,7 +74,7 @@ const runDemoWorker = (run) => {
     run.timer = setTimeout(() => {
       if (run.status === 'cancelled') return
       run.progress = step.progress
-      if (step.type === 'completed') finishRun(run, 'completed', step.message)
+      if (step.type === 'completed' || step.type === 'failed') finishRun(run, step.type, step.message)
       else {
         sendEvent(run, { ...step, timestamp: new Date().toISOString() })
         index += 1
@@ -58,7 +92,8 @@ app.post('/api/tasks', (request, response) => {
   if (!title) return response.status(400).json({ error: 'A task title is required.' })
   const run = { id: randomUUID(), title, owner, status: 'queued', progress: 0, events: [], clients: new Set(), timer: null, createdAt: new Date().toISOString() }
   tasks.set(run.id, run)
-  runDemoWorker(run)
+  if (providerEnabled) runProviderWorker(run)
+  else runDemoWorker(run)
   return response.status(201).json({ id: run.id, title: run.title, owner: run.owner, status: run.status, progress: run.progress, createdAt: run.createdAt })
 })
 
@@ -82,4 +117,4 @@ app.post('/api/tasks/:id/cancel', (request, response) => {
   return response.json({ id: run.id, status: run.status })
 })
 
-app.listen(port, () => console.log(`Orbit demo worker listening on http://localhost:${port}`))
+app.listen(port, () => console.log(`Orbit worker listening on http://localhost:${port} (${providerEnabled ? '9Router' : 'demo'} mode)`))
