@@ -47,7 +47,10 @@ const runProviderWorker = async (run) => {
       }),
       signal: run.abortController.signal,
     })
-    if (!providerResponse.ok) throw new Error(`9Router returned HTTP ${providerResponse.status}`)
+    if (!providerResponse.ok) {
+      const providerError = await providerResponse.text()
+      throw new Error(`9Router returned HTTP ${providerResponse.status}: ${providerError.slice(0, 240)}`)
+    }
     const payload = await providerResponse.json()
     run.result = payload.choices?.[0]?.message?.content || 'The model returned no text.'
     run.progress = 92
