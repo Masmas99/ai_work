@@ -1,4 +1,4 @@
-import { StrictMode, useState } from 'react'
+import { StrictMode, useEffect, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import './styles.css'
 
@@ -31,6 +31,10 @@ function App() {
   const [taskTitle, setTaskTitle] = useState('')
   const [taskOwner, setTaskOwner] = useState('Nova')
   const [notice, setNotice] = useState('')
+  const [activeRun, setActiveRun] = useState(null)
+  const [runEvents, setRunEvents] = useState([])
+  const eventSource = useRef(null)
+  const activeRunRef = useRef(null)
 
   const completeTask = (id) => {
     setTasks((current) => current.map((task) => task.id === id ? { ...task, status: 'Done' } : task))
@@ -38,18 +42,60 @@ function App() {
     window.setTimeout(() => setNotice(''), 2200)
   }
 
-  const createTask = (event) => {
+  const createTask = async (event) => {
     event.preventDefault()
     if (!taskTitle.trim()) return
-    setTasks((current) => [
-      { id: Date.now(), title: taskTitle.trim(), owner: taskOwner, due: 'New', status: 'Queued', tone: taskOwner === 'Nova' ? 'coral' : taskOwner === 'Atlas' ? 'blue' : 'yellow' },
-      ...current,
-    ])
+    const title = taskTitle.trim()
+    const response = await fetch('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title, owner: taskOwner }) })
+    if (!response.ok) {
+      setNotice('Could not start the demo worker')
+      return
+    }
+    const created = await response.json()
+    setTasks((current) => [{ id: created.id, title, owner: taskOwner, due: 'Now', status: 'Queued', tone: taskOwner === 'Nova' ? 'coral' : taskOwner === 'Atlas' ? 'blue' : 'yellow', progress: 0 }, ...current])
+    subscribeToRun(created)
     setTaskTitle('')
     setTaskOpen(false)
     setNotice('Task sent to your AI Employee')
     window.setTimeout(() => setNotice(''), 2400)
   }
+
+  const subscribeToRun = (run) => {
+    eventSource.current?.close()
+    const nextRun = { ...run, status: 'queued', progress: 0 }
+    activeRunRef.current = nextRun
+    setActiveRun(nextRun)
+    setRunEvents([])
+    const source = new EventSource(`/api/tasks/${run.id}/events`)
+    eventSource.current = source
+    source.onmessage = (message) => updateRun(JSON.parse(message.data))
+    ;['ready', 'queued', 'planning', 'tool_call', 'observation', 'progress', 'completed', 'failed', 'cancelled'].forEach((type) => {
+      source.addEventListener(type, (message) => updateRun(JSON.parse(message.data)))
+    })
+  }
+
+  const updateRun = (event) => {
+    setActiveRun((current) => {
+      if (!current) return current
+      const nextRun = { ...current, status: event.type, progress: event.progress ?? current.progress, message: event.message ?? current.message }
+      activeRunRef.current = nextRun
+      return nextRun
+    })
+    if (event.type !== 'ready') setRunEvents((current) => [{ ...event }, ...current].slice(0, 5))
+    if (['completed', 'failed', 'cancelled'].includes(event.type)) {
+      setTasks((current) => current.map((task) => task.id === activeRunRef.current?.id ? { ...task, status: event.type === 'completed' ? 'Done' : event.type === 'cancelled' ? 'Cancelled' : 'Failed', progress: event.progress ?? task.progress } : task))
+      eventSource.current?.close()
+    } else if (event.type !== 'ready') {
+      setTasks((current) => current.map((task) => task.id === activeRunRef.current?.id ? { ...task, status: event.type === 'tool_call' ? 'Working' : 'In progress', progress: event.progress ?? task.progress } : task))
+    }
+  }
+
+  const cancelRun = async () => {
+    if (!activeRun) return
+    await fetch(`/api/tasks/${activeRun.id}/cancel`, { method: 'POST' })
+  }
+
+  useEffect(() => () => eventSource.current?.close(), [])
 
   const toggleEmployee = (id) => {
     setEmployees((current) => current.map((employee) => employee.id === id
@@ -165,15 +211,16 @@ function App() {
         <aside className="right-panel">
           <div className="right-panel-head"><div><p className="eyebrow">Your focus</p><h2>Current task</h2></div><button className="close-button" aria-label="Close current task">×</button></div>
           <div className="focus-card">
-            <div className="focus-top"><span className="focus-icon">✦</span><span className="focus-status"><span /> In progress</span></div>
-            <h3>Summarize customer interview notes</h3>
-            <p>Pull out the strongest insights and open questions from this week's calls.</p>
-            <div className="focus-owner"><div className="avatar coral small">N<span className="presence" /></div><div><strong>Nova</strong><span>Researcher</span></div><button className="more-button">•••</button></div>
-            <div className="progress-label"><span>Progress</span><span>68%</span></div><div className="progress-track"><span /></div>
-            <button className="outline-button" onClick={() => setActiveNav('tasks')}>Open task <span>↗</span></button>
+            <div className="focus-top"><span className="focus-icon">✦</span><span className="focus-status"><span /> {activeRun ? activeRun.status.replace('_', ' ') : 'In progress'}</span></div>
+            <h3>{activeRun?.title || 'Summarize customer interview notes'}</h3>
+            <p>{activeRun?.message || "Pull out the strongest insights and open questions from this week's calls."}</p>
+            <div className="focus-owner"><div className="avatar coral small">N<span className="presence" /></div><div><strong>{activeRun?.owner || 'Nova'}</strong><span>Researcher</span></div><button className="more-button">•••</button></div>
+            <div className="progress-label"><span>Progress</span><span>{activeRun?.progress ?? 68}%</span></div><div className="progress-track"><span style={{ width: `${activeRun?.progress ?? 68}%` }} /></div>
+            {activeRun && !['completed', 'failed', 'cancelled'].includes(activeRun.status) ? <button className="outline-button" onClick={cancelRun}>Cancel run <span>×</span></button> : <button className="outline-button" onClick={() => setActiveNav('tasks')}>Open task <span>↗</span></button>}
           </div>
           <div className="activity-heading"><h3>Recent activity</h3><button className="text-button">See all</button></div>
           <div className="activity-list">
+            {runEvents.map((event, index) => <div className="activity-item" key={`${event.timestamp}-${index}`}><span className={`activity-dot ${event.type === 'tool_call' ? 'blue' : event.type === 'completed' ? 'yellow' : 'coral'}`} /><p><strong>{event.type.replace('_', ' ')}</strong> · {event.message}<small>just now</small></p></div>)}
             <div className="activity-item"><span className="activity-dot coral" /><p><strong>Nova</strong> added a note to <b>Customer interview notes</b><small>12 min ago</small></p></div>
             <div className="activity-item"><span className="activity-dot blue" /><p><strong>Atlas</strong> started <b>Q4 launch checklist</b><small>48 min ago</small></p></div>
             <div className="activity-item"><span className="activity-dot yellow" /><p><strong>Pixel</strong> shared 3 new concepts<small>Yesterday</small></p></div>
